@@ -1,4 +1,5 @@
 import io
+import json
 from datetime import datetime
 import pandas as pd
 import pypdf
@@ -25,13 +26,13 @@ def load_data():
         "https://www.googleapis.com/auth/drive"
     ]
     
-    # Load credentials from Streamlit secrets
-    creds_dict = dict(st.secrets["connections"]["gsheets"])
+    # Load credentials from the single-line JSON secret
+    creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     
     # Open spreadsheet by URL specified in secrets
-    sheet_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
+    sheet_url = st.secrets["spreadsheet_url"]
     spreadsheet = client.open_by_url(sheet_url)
     
     # Read worksheets into DataFrames
@@ -55,12 +56,12 @@ except Exception as e:
 st.sidebar.header("🔍 Filters & Selection")
 
 # Filter ASM
-asm_list = outlet_master_df["ASM"].dropna().unique().tolist()
+asm_list = outlet_master_df["ASM"].dropna().unique().tolist() if "ASM" in outlet_master_df.columns else []
 selected_asm = st.sidebar.selectbox("Select ASM", ["--Select--"] + asm_list)
 
 if selected_asm != "--Select--":
     filtered_tse = outlet_master_df[outlet_master_df["ASM"] == selected_asm]
-    tse_list = filtered_tse["TSE"].dropna().unique().tolist()
+    tse_list = filtered_tse["TSE"].dropna().unique().tolist() if "TSE" in filtered_tse.columns else []
     selected_tse = st.sidebar.selectbox("Select TSE", ["--Select--"] + tse_list)
 else:
     selected_tse = st.sidebar.selectbox("Select TSE", ["--Select--"])
@@ -74,8 +75,11 @@ else:
     filtered_outlets = outlet_master_df
 
 # Create a combined label for selection
-filtered_outlets["Outlet_Display"] = filtered_outlets["Outlet Code"].astype(str) + " - " + filtered_outlets["Outlet Name"].astype(str)
-outlet_options = ["--Select--"] + filtered_outlets["Outlet_Display"].tolist()
+if "Outlet Code" in filtered_outlets.columns and "Outlet Name" in filtered_outlets.columns:
+    filtered_outlets["Outlet_Display"] = filtered_outlets["Outlet Code"].astype(str) + " - " + filtered_outlets["Outlet Name"].astype(str)
+    outlet_options = ["--Select--"] + filtered_outlets["Outlet_Display"].tolist()
+else:
+    outlet_options = ["--Select--"]
 
 selected_outlet_display = st.sidebar.selectbox("Select Outlet (Code & Name)", outlet_options)
 

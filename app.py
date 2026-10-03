@@ -1,11 +1,11 @@
 import io
-import os
 from datetime import datetime
 import pandas as pd
 import pypdf
 from PIL import Image
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
+import gspread
+from google.oauth2.service_account import Credentials
 
 # Page Configuration
 st.set_page_config(
@@ -13,23 +13,38 @@ st.set_page_config(
 )
 
 st.title("📦 Tertiary Data Entry Portal")
-st.markdown("Enter outlet-wise tertiary stock data, quantities, and upload verification files.")
+st.markdown("Enter outlet-wise tertiary stock data, quantities, and upload verification files[cite: 1].")
 
 # -------------------------------------------------------------------------
-# 1. CONNECTION & DATA LOADING FROM GOOGLE SHEETS
+# 1. GOOGLE SHEETS CONNECTION & DATA LOADING VIA GSPREAD
 # -------------------------------------------------------------------------
-# Initialize Google Sheets Connection
-# Ensure you have configured your [connections.gsheets] in .streamlit/secrets.toml
 @st.cache_data(ttl=60)
 def load_data():
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    # Read Outlet Master and Tertiary Data sheets
-    outlet_master = conn.read(worksheet="Outlet Master", usecols=list(range(4)))  # Adjust columns as needed (ASM, TSE, Outlet Code, Outlet Name)
-    tertiary_data = conn.read(worksheet="Tertiary Data")
-    return conn, outlet_master, tertiary_data
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    
+    # Load credentials from Streamlit secrets
+    creds_dict = dict(st.secrets["connections"]["gsheets"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    client = gspread.authorize(creds)
+    
+    # Open spreadsheet by URL specified in secrets
+    sheet_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
+    spreadsheet = client.open_by_url(sheet_url)
+    
+    # Read worksheets into DataFrames
+    outlet_master_ws = spreadsheet.worksheet("Outlet Master")
+    tertiary_ws = spreadsheet.worksheet("Tertiary Data")
+    
+    outlet_master = pd.DataFrame(outlet_master_ws.get_all_records())
+    tertiary_data = pd.DataFrame(tertiary_ws.get_all_records())
+    
+    return spreadsheet, outlet_master, tertiary_data
 
 try:
-    conn, outlet_master_df, tertiary_df = load_data()
+    spreadsheet, outlet_master_df, tertiary_df = load_data()
 except Exception as e:
     st.error(f"Failed to connect to Google Sheets: {e}")
     st.stop()
@@ -74,14 +89,13 @@ selected_month = st.sidebar.selectbox("Select Month", months_list, index=months_
 # 3. STOCK ENTRY GRID (Bottles Entry)
 # -------------------------------------------------------------------------
 st.subheader("📋 Stock Entry (In Bottles)")
-st.info("Enter quantities in bottles for each brand configuration.")
+st.info("Enter quantities in bottles for each brand configuration[cite: 1].")
 
 brands = [
     "IBDC", "MHW", "MHFB", "BLGOR", "BLGLM", 
     "SMG", "SMGP", "SIW", "SITARA", "Monarch"
 ]
 
-# We will use a form to collect inputs cleanly
 with st.form("tertiary_entry_form"):
     stock_data = {}
     
@@ -128,26 +142,21 @@ with st.form("tertiary_entry_form"):
     submitted = st.form_submit_button("🚀 Submit Tertiary Entry")
 
 # -------------------------------------------------------------------------
-# 4. SUBMISSION HANDLING & CONVERSION LOGIC
+# 4. SUBMISSION HANDLING & CASE CONVERSION LOGIC
 # -------------------------------------------------------------------------
 if submitted:
-    # Validation checks
     if selected_asm == "--Select--" or selected_tse == "--Select--" or selected_outlet_display == "--Select--":
         st.error("⚠️ Please select valid ASM, TSE, and Outlet filters before submitting.")
     elif upload_1 is None:
         st.error("⚠️ Upload 1 is mandatory. Please attach the required document.")
     else:
-        # Extract Outlet Code and Name
         outlet_code = selected_outlet_display.split(" - ")[0]
         outlet_name = " - ".join(selected_outlet_display.split(" - ")[1:])
         
-        # Conversion to cases calculations:
-        # 750ml -> pack of 12, 500ml -> pack of 18, 375ml -> pack of 24, 180ml -> pack of 48
         cases_records = []
-        bottles_records = []
         
         for brand, vals in stock_data.items():
-            # Cases computation (float representation for partial cases or standard rounding)
+            # Conversion rules: 750/12, 500/18, 375/24, 180/48[cite: 1]
             c_750 = vals["750"] / 12 if vals["750"] > 0 else 0
             c_500 = vals["500"] / 18 if vals["500"] > 0 else 0
             c_375 = vals["375"] / 24 if vals["375"] > 0 else 0
@@ -162,14 +171,14 @@ if submitted:
                 "Outlet Name": outlet_name,
                 "Brand": brand,
                 "Type": "Cases",
-                "750ml (12)':": round(c_750, 2),
+                "750ml (12)": round(c_750, 2),
                 "500ml (18)": round(c_500, 2),
                 "375ml (24)": round(c_375, 2),
                 "180ml (48)": round(c_180, 2),
                 "Total Cases": round(c_750 + c_500 + c_375 + c_180, 2)
             })
 
-        # Process and combine uploaded documents into a single PDF
+        # Process and combine uploaded files into a single PDF
         pdf_writer = pypdf.PdfWriter()
         uploaded_files = [f for f in [upload_1, upload_2, upload_3, upload_4] if f is not None]
         
@@ -183,7 +192,6 @@ if submitted:
                     pdf_writer.add_page(page)
             elif file_extension in ['png', 'jpg', 'jpeg']:
                 image = Image.open(io.BytesIO(file_bytes))
-                # Convert image to RGB PDF page
                 rgb_image = image.convert('RGB')
                 img_byte_arr = io.BytesIO()
                 rgb_image.save(img_byte_arr, format='PDF')
@@ -193,7 +201,7 @@ if submitted:
                 for page in img_reader.pages:
                     pdf_writer.add_page(page)
 
-        # Rename combined PDF file format: Outlet Code, Name and Month[cite: 1]
+        # File naming convention: Outlet Code, Name and Month[cite: 1]
         safe_outlet_name = "".join(c for c in outlet_name if c.isalnum() or c.isspace()).strip()
         combined_pdf_filename = f"{outlet_code}_{safe_outlet_name}_{selected_month}.pdf"
         
@@ -201,15 +209,18 @@ if submitted:
         pdf_writer.write(final_pdf_bytes)
         final_pdf_bytes.seek(0)
         
-        # Save to Google Sheets
+        # Save to Google Sheets via gspread
         try:
+            tertiary_ws = spreadsheet.worksheet("Tertiary Data")
             new_entry_df = pd.DataFrame(cases_records)
             updated_df = pd.concat([tertiary_df, new_entry_df], ignore_index=True)
-            conn.update(worksheet="Tertiary Data", data=updated_df)
+            
+            # Update worksheet data back to Google Sheets
+            tertiary_ws.clear()
+            tertiary_ws.update([updated_df.columns.values.tolist()] + updated_df.values.tolist())
             
             st.success("✅ Data successfully converted to cases and saved to Google Sheets[cite: 1]!")
             
-            # Optional: Provide download link for the combined PDF locally or upload storage integration
             st.download_button(
                 label="📥 Download Combined Renamed PDF",
                 data=final_pdf_bytes,
